@@ -40,32 +40,33 @@ function RegisterModalInner({ isOpen, onClose, onRegister, balance, isPending }:
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="bg-gray-900 text-white border-emerald-500/20">
         <DialogHeader>
-          <DialogTitle className="text-emerald-400">Register to Play Blackjack</DialogTitle>
+          <DialogTitle className="text-emerald-400">Register &amp; buy chips</DialogTitle>
           <DialogDescription className="text-gray-400">
-            Enter the amount you want to register with. This will be your initial balance.
+            Deposit ETH to receive CHIP tokens, converted at the current ETH/USD price.
+            This registers you and mints chips to your wallet.
           </DialogDescription>
         </DialogHeader>
         <div className="py-4">
           <div className="mb-4">
             <label className="block text-sm font-bold mb-2 text-emerald-400">
-              Registration Amount (XTZ)
+              Amount to deposit (ETH)
             </label>
             <Input
               type="number"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               className="bg-gray-800 text-white border-emerald-500/30 focus:border-emerald-500"
-              placeholder="10"
-              min="0.01"
+              placeholder="0.05"
+              min="0.001"
               max={balance}
-              step="0.01"
+              step="0.001"
             />
           </div>
           <div className="text-sm text-emerald-400">
-            Available Balance: {balance.toLocaleString("fr-FR", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })} XTZ
+            Wallet balance: {balance.toLocaleString("fr-FR", {
+              minimumFractionDigits: 4,
+              maximumFractionDigits: 4,
+            })} ETH
           </div>
         </div>
         <DialogFooter>
@@ -81,7 +82,7 @@ function RegisterModalInner({ isOpen, onClose, onRegister, balance, isPending }:
             disabled={isPending || !amount || parseFloat(amount) <= 0 || parseFloat(amount) > balance}
             className="bg-emerald-500 hover:bg-emerald-600 text-black"
           >
-            {isPending ? 'Processing...' : 'Register'}
+            {isPending ? 'Processing...' : 'Register & buy chips'}
           </Button>
         </DialogFooter>
       </DialogContent>

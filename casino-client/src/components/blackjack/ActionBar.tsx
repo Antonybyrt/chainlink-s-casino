@@ -100,13 +100,13 @@ export function ActionBar({
         <div>
           <p className="text-[10px] text-yellow-600/70 font-mono uppercase tracking-widest">Balance</p>
           <p className="text-white font-mono text-lg font-bold">
-            {casinoBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} XTZ
+            {casinoBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} CHIP
           </p>
         </div>
         <div>
           <p className="text-[10px] text-yellow-600/70 font-mono uppercase tracking-widest">Current Bet</p>
           <p className="text-white font-mono text-lg font-bold">
-            {(currentBet ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} XTZ
+            {(currentBet ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} CHIP
           </p>
         </div>
       </div>

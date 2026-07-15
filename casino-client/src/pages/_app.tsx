@@ -11,9 +11,9 @@ import { useState, type ReactNode } from "react";
 import { ThirdwebProvider } from "thirdweb/react";
 
 export const metadata: Metadata = {
-  title: "Casino Etherlink",
+  title: "Casino Sepolia",
   description:
-    "Playing different casino games on the Etherlink chain",
+    "Playing different casino games on Ethereum Sepolia",
 };
 
 export default function App({ Component, pageProps }: AppProps) {

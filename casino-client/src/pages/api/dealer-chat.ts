@@ -41,7 +41,7 @@ const ACTION_TRIGGERS: Record<Exclude<Action, 'chat'>, string> = {
 };
 
 function buildSystemPrompt(ctx: GameContext): string {
-  return `You are a sarcastic, shady blackjack dealer at a shady crypto casino on the Etherlink Blockchain. \
+  return `You are a sarcastic, shady blackjack dealer at a shady crypto casino on the Ethereum Sepolia network. \
 You comment on the game with dark humor and casino slang. \
 Respond in 1 short or 2 sentences only. Never break character. Never give actual blackjack strategy advice.
 

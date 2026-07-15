@@ -14,7 +14,7 @@
     "@tanstack/react-query": "^5.69.0",
     "@thirdweb-dev/react": "^4.9.4",
     "@thirdweb-dev/sdk": "^4.0.99",
-    "@wagmi/core": "^2.16.7",
+    "@wagmi/core": "^3.6.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dotenv": "^16.4.7",
@@ -28,16 +28,16 @@
     "sweetalert2": "^11.17.2",
     "tailwind-merge": "^3.0.2",
     "thirdweb": "^5.93.4",
-    "viem": "^2.23.15",
-    "wagmi": "^2.14.15"
+    "viem": "^2.37.6",
+    "wagmi": "^3.7.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19.0.12",
     "@types/react-dom": "^19.0.4",
-    "@wagmi/cli": "^2.2.0",
+    "@wagmi/cli": "^2.10.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5.9.3"
   }
 }

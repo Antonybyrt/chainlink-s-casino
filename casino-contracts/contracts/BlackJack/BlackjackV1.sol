@@ -5,10 +5,26 @@ pragma solidity >=0.8.2 <0.9.0;
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {IVRFCoordinatorV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
+import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import "../CasinoChip.sol";
 import "./BlackjackLibrary.sol";
 import "./BlackjackTypes.sol";
 
 
+/**
+ * @title BlackjackV1
+ * @notice Upgradeable (UUPS) Blackjack casino using Chainlink VRF v2.5 to shuffle the deck.
+ * @dev Starting a game is a two-step, asynchronous flow:
+ *      1. `newGame` locks the bet and requests randomness from the VRF coordinator.
+ *      2. `rawFulfillRandomWords` (called back by the coordinator) shuffles the deck
+ *         with the verifiable random word and deals the initial hands.
+ *      The contract does not inherit VRFConsumerBaseV2Plus because that base uses a
+ *      constructor and ConfirmedOwner, which are incompatible with the proxy /
+ *      OwnableUpgradeable pattern. The consumer logic is reproduced in an
+ *      initializer-based, upgrade-safe form instead.
+ */
 contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     using BlackjackLibrary for uint8[];
 
@@ -34,6 +50,15 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     error NotAllowed();
     error ExceededLimit();
     error GameAlreadyInProgress();
+    error OnlyCoordinatorCanFulfill(address have, address want);
+    error ZeroAddress();
+    error RequestNotFound(uint256 requestId);
+    error GameNotWaitingForRandomness(uint256 gameId);
+    error InvalidPrice();
+    error StalePrice();
+    error EthTransferFailed();
+    error InsufficientChips();
+    error NothingToConvert();
 
     // =============================================================
     //                          STATE VARIABLES
@@ -45,6 +70,22 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     mapping(address => bool) public blacklist;
     mapping(address => uint256) public activeGame;
     uint256 public gameIdCounter;
+
+    // ----- Chainlink VRF v2.5 configuration (appended to preserve storage layout) -----
+    IVRFCoordinatorV2Plus public s_vrfCoordinator;
+    bytes32 public s_keyHash;
+    uint256 public s_subscriptionId;
+    uint32 public s_callbackGasLimit;
+    uint16 public s_requestConfirmations;
+    uint32 public s_numWords;
+    bool public s_nativePayment;
+    // maps a VRF request id to the game it will deal
+    mapping(uint256 => uint256) public requestIdToGameId;
+
+    // ----- Casino chip economy -----
+    CasinoChip public chip;                 // the ERC20 chip used to bet (1 CHIP = 1 USD)
+    AggregatorV3Interface public priceFeed; // ETH/USD Chainlink data feed
+    uint256 public constant PRICE_STALENESS = 6 hours; // max age of a price answer
 
     // =============================================================
     //                          EVENTS
@@ -60,16 +101,52 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     event Blacklisted(address indexed player);
     event RemovedFromBlacklist(address indexed player);
     event GameStopped(uint256 indexed gameId, address indexed player);
+    event RandomnessRequested(uint256 indexed gameId, address indexed player, uint256 requestId);
+    event VrfConfigUpdated(bytes32 keyHash, uint256 subscriptionId, uint32 callbackGasLimit, uint16 requestConfirmations, bool nativePayment);
+    event CoordinatorUpdated(address indexed coordinator);
+    event ChipsPurchased(address indexed player, uint256 ethIn, uint256 ethUsdPrice, uint256 chipsOut);
+    event ChipsCashedOut(address indexed player, uint256 chipsIn, uint256 ethUsdPrice, uint256 ethOut);
+    event HouseFunded(address indexed from, uint256 ethIn, uint256 chipsMinted);
+    event PriceFeedUpdated(address indexed priceFeed);
 
     // =============================================================
     //                          CONSTRUCTOR
     // =============================================================
 
     //constructor() payable Ownable(msg.sender){}
-    function initialize() payable public initializer {
+    /**
+     * @notice Initializes the proxy with the Chainlink VRF v2.5 configuration, the CHIP
+     *         token and the ETH/USD price feed.
+     * @param vrfCoordinator address of the VRF v2.5 coordinator on the target network
+     * @param keyHash gas-lane key hash to use for randomness requests
+     * @param subscriptionId the VRF subscription id that funds the requests
+     * @param chipToken address of the deployed CasinoChip ERC20
+     * @param ethUsdPriceFeed address of the Chainlink ETH/USD data feed
+     */
+    function initialize(
+        address vrfCoordinator,
+        bytes32 keyHash,
+        uint256 subscriptionId,
+        address chipToken,
+        address ethUsdPriceFeed
+    ) payable public initializer {
+        if (vrfCoordinator == address(0)) revert ZeroAddress();
+        if (chipToken == address(0)) revert ZeroAddress();
+        if (ethUsdPriceFeed == address(0)) revert ZeroAddress();
         gameIdCounter = 0;
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
+
+        s_vrfCoordinator = IVRFCoordinatorV2Plus(vrfCoordinator);
+        s_keyHash = keyHash;
+        s_subscriptionId = subscriptionId;
+        s_callbackGasLimit = 500000;
+        s_requestConfirmations = 3;
+        s_numWords = 1;
+        s_nativePayment = false;
+
+        chip = CasinoChip(chipToken);
+        priceFeed = AggregatorV3Interface(ethUsdPriceFeed);
     }
 
     // =============================================================
@@ -87,19 +164,85 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
     /**
      * @notice starts a new game for a registered player
-     * @dev the player must indicate his bet, two cards are distributed to the player and dealer, natural Blackjack calculated
+     * @dev locks the bet, creates a game in the WaitingForRandomness stage and requests a
+     *      verifiable random word from Chainlink VRF. The cards are NOT dealt here: the
+     *      coordinator later calls back rawFulfillRandomWords, which shuffles the deck and
+     *      deals the initial hands.
      * @param bet the bet of the player
      * @return gameId the id of the game created
      */
     function newGame(uint256 bet) public returns (uint256) {
         if (players[msg.sender].addr == address(0)) revert NotRegistered();
-        if (bet == 0 || bet > players[msg.sender].balance) revert InvalidBet();
+        if (bet == 0) revert InvalidBet();
         if (blacklist[msg.sender] == true) revert NotAllowed();
         if (activeGame[msg.sender] != 0) revert GameAlreadyInProgress();
 
-        gameIdCounter ++;
+        // Escrow the bet in CHIP (requires prior approve); reverts on insufficient funds/allowance
+        if (chip.balanceOf(msg.sender) < bet) revert InsufficientChips();
+        chip.transferFrom(msg.sender, address(this), bet);
 
-        return BlackjackLibrary.newGame(bet, gameIdCounter, games, players, activeGame);
+        gameIdCounter ++;
+        uint256 gameId = gameIdCounter;
+
+        BlackjackLibrary.startGame(bet, gameId, games, activeGame);
+
+        uint256 requestId = s_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash: s_keyHash,
+                subId: s_subscriptionId,
+                requestConfirmations: s_requestConfirmations,
+                callbackGasLimit: s_callbackGasLimit,
+                numWords: s_numWords,
+                extraArgs: VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({nativePayment: s_nativePayment})
+                )
+            })
+        );
+
+        requestIdToGameId[requestId] = gameId;
+        emit RandomnessRequested(gameId, msg.sender, requestId);
+
+        return gameId;
+    }
+
+    // =============================================================
+    //                          CHAINLINK VRF
+    // =============================================================
+
+    /**
+     * @notice Entry point called by the VRF coordinator to deliver the random words.
+     * @dev Mirrors VRFConsumerBaseV2Plus.rawFulfillRandomWords but reads the coordinator
+     *      from storage (set in initialize) so it is proxy/upgrade safe. Only the
+     *      configured coordinator may call it.
+     * @param requestId the id returned by the original requestRandomWords call
+     * @param randomWords the verifiable random words produced by VRF
+     */
+    function rawFulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) external {
+        if (msg.sender != address(s_vrfCoordinator)) {
+            revert OnlyCoordinatorCanFulfill(msg.sender, address(s_vrfCoordinator));
+        }
+        fulfillRandomWords(requestId, randomWords);
+    }
+
+    /**
+     * @notice Shuffles the deck with the VRF seed and deals the initial hands.
+     * @param requestId the id of the fulfilled request
+     * @param randomWords the verifiable random words; randomWords[0] seeds the shuffle
+     */
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) internal {
+        uint256 gameId = requestIdToGameId[requestId];
+        if (gameId == 0) revert RequestNotFound(requestId);
+
+        Game storage game = games[gameId];
+        if (game.stage != Stage.WaitingForRandomness) revert GameNotWaitingForRandomness(gameId);
+
+        delete requestIdToGameId[requestId];
+
+        address player = game.player.addr;
+        uint256 payout = BlackjackLibrary.dealInitialCards(randomWords[0], gameId, games, activeGame);
+        if (payout > 0) {
+            chip.transfer(player, payout); // pay out a natural blackjack (or push refund)
+        }
     }
 
 
@@ -109,15 +252,16 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
     /**
      * @notice registers a player to the casino
-     * @dev Must send funds to register, funds added to the balance
+     * @dev Registration is the participation gate. Any ETH sent is converted to CHIP
+     *      (via the price feed) and minted to the player's wallet, so a player can
+     *      register and buy chips in a single call.
      */
     function register() public payable {
-        if (msg.value == 0) revert NoFundsSent();
         if (players[msg.sender].addr != address(0)) revert AlreadyRegistered();
         if (blacklist[msg.sender] == true) revert NotAllowed();
         players[msg.sender] = Player({
             addr: msg.sender,
-            balance: msg.value,
+            balance: 0,
             bet: 0,
             hand: new uint8[](0),
             splitHand: new uint8[](0),
@@ -125,6 +269,45 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
             isStanding: false
         });
         emit Registered(msg.sender, msg.value);
+        if (msg.value > 0) {
+            _buyChips(msg.sender, msg.value);
+        }
+    }
+
+    /**
+     * @notice buys CHIP by depositing ETH, priced in USD via the Chainlink feed.
+     * @dev 1 CHIP is minted per US dollar of ETH sent (18 decimals). Chips are minted
+     *      to the caller's wallet; to play they must be approved to this contract.
+     */
+    function buyChips() public payable {
+        _buyChips(msg.sender, msg.value);
+    }
+
+    /**
+     * @notice alias of buyChips kept for backwards compatibility.
+     */
+    function deposit() public payable {
+        _buyChips(msg.sender, msg.value);
+    }
+
+    /**
+     * @notice converts CHIP back to ETH at the current price, burning the chips.
+     * @param chipAmount amount of CHIP (18 decimals) to redeem
+     */
+    function cashOut(uint256 chipAmount) public {
+        if (chipAmount == 0) revert NothingToConvert();
+        if (blacklist[msg.sender] == true) revert NotAllowed();
+        if (chip.balanceOf(msg.sender) < chipAmount) revert InsufficientChips();
+
+        (uint256 price, uint8 feedDecimals) = _latestEthUsd();
+        // ethOut = chipAmount * 10^feedDecimals / price
+        uint256 ethOut = (chipAmount * (10 ** feedDecimals)) / price;
+        if (ethOut == 0 || ethOut > address(this).balance) revert InsufficientBalance();
+
+        chip.burn(msg.sender, chipAmount);
+        (bool success, ) = payable(msg.sender).call{value: ethOut}("");
+        if (!success) revert EthTransferFailed();
+        emit ChipsCashedOut(msg.sender, chipAmount, price, ethOut);
     }
 
     /**
@@ -193,10 +376,11 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         if (game.finished) revert GameFinished();
         if (msg.sender != game.player.addr) revert NotYourGame();
         if (game.player.hand.length != 2) revert DoubleOnlyAllowed();
-        if (players[msg.sender].balance < game.player.bet) revert InsufficientBalanceToDouble();
         if (game.currentCardIndex >= game.deck.length) revert DeckEmpty();
+        if (chip.balanceOf(msg.sender) < game.player.bet) revert InsufficientBalanceToDouble();
 
-        players[msg.sender].balance -= game.player.bet;
+        // Escrow an additional bet equal to the current bet
+        chip.transferFrom(msg.sender, address(this), game.player.bet);
         game.player.bet *= 2;
 
         game.player.hand.push(game.deck[game.currentCardIndex]);
@@ -227,16 +411,17 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         if (game.finished) revert GameFinished();
         if (msg.sender != game.player.addr) revert NotYourGame();
         if (game.player.hand.length != 2) revert SplitOnlyAllowedWith2Cards();
-        if (players[msg.sender].balance < game.player.bet) revert InsufficientBalanceToDouble();
 
-        players[msg.sender].balance -= game.player.bet;
-        game.player.bet *= 2;
-        game.player.hasSplit = true;
-        
         uint8 firstRank = game.player.hand[0] % 13;
         uint8 secondRank = game.player.hand[1] % 13;
         if (firstRank != secondRank) revert CardsDoNotMatchForSplit();
-        if (players[msg.sender].balance < game.player.bet) revert InsufficientBalanceToSplit();
+
+        // Escrow an additional bet equal to the original bet, doubling the total stake
+        uint256 additionalBet = game.player.bet;
+        if (chip.balanceOf(msg.sender) < additionalBet) revert InsufficientBalanceToSplit();
+        chip.transferFrom(msg.sender, address(this), additionalBet);
+        game.player.bet *= 2;
+        game.player.hasSplit = true;
 
         game.player.hand.pop();
         game.splitPlayer.hand.push(game.deck[game.currentCardIndex - 1]);
@@ -274,9 +459,10 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         
         if (dealerTotal > limitValue) {
             game.finished = true;
-            players[game.player.addr].balance += game.player.bet * 2;
-            emit GameResolved(gameId, game.player.addr, Outcome.Win, 100, game.player.bet * 2);
-            activeGame[msg.sender] = 0;
+            uint256 payout = game.player.bet * 2;
+            emit GameResolved(gameId, game.player.addr, Outcome.Win, 100, payout);
+            activeGame[game.player.addr] = 0;
+            chip.transfer(game.player.addr, payout);
             return;
         }
         resolveGame(gameId);
@@ -343,43 +529,70 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
             winPercentage = ((totalPayout - totalBet) * 100) / totalBet;
         }
         
-        if (totalPayout > 0) {
-            players[game.player.addr].balance += totalPayout;
-        }
-        
         game.finished = true;
-        
+
         emit GameResolved(gameId, game.player.addr, outcome, winPercentage, totalPayout);
-        activeGame[msg.sender] = 0;
+        activeGame[game.player.addr] = 0;
+
+        if (totalPayout > 0) {
+            chip.transfer(game.player.addr, totalPayout);
+        }
     }
 
 
     /**
-     * @notice allows a player to withdraw funds from the contract.
-     * @param amount the amount to withdraw.
+     * @notice Funds the house chip reserve so the contract can pay out winnings.
+     * @dev The owner deposits ETH, which is converted to CHIP via the price feed and
+     *      minted to this contract. This keeps the CHIP supply backed by ETH held here.
      */
-    function playerWithdraw(uint256 amount) public {
-        if (amount == 0) revert();
-        if (amount > players[msg.sender].balance) revert InsufficientBalance();
-        if (blacklist[msg.sender] == true) revert NotAllowed();
-
-        players[msg.sender].balance -= amount;
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        if (!success) revert TransferFailed();
-        emit Withdrawal(msg.sender, amount);
-    }
-
-    /**
-     * @notice allows depositing funds into the contract.
-     */
-    function deposit() public payable {
+    function fundHouse() external payable onlyOwner {
         if (msg.value == 0) revert NoFundsSent();
+        (uint256 price, uint8 feedDecimals) = _latestEthUsd();
+        uint256 chips = (msg.value * price) / (10 ** feedDecimals);
+        if (chips == 0) revert NothingToConvert();
+        chip.mint(address(this), chips);
+        emit HouseFunded(msg.sender, msg.value, chips);
+    }
 
-        uint256 newPlayerbalance = players[msg.sender].balance + msg.value;
-        if((newPlayerbalance * 2) >= address(this).balance) revert ExceededLimit();
+    /**
+     * @notice Converts an ETH amount to CHIP and mints it to `to`.
+     */
+    function _buyChips(address to, uint256 ethAmount) internal {
+        if (ethAmount == 0) revert NoFundsSent();
+        (uint256 price, uint8 feedDecimals) = _latestEthUsd();
+        uint256 chips = (ethAmount * price) / (10 ** feedDecimals);
+        if (chips == 0) revert NothingToConvert();
+        chip.mint(to, chips);
+        emit ChipsPurchased(to, ethAmount, price, chips);
+    }
 
-        players[msg.sender].balance += msg.value;
-        emit Deposit(msg.sender, msg.value);
+    /**
+     * @notice Reads and validates the latest ETH/USD price.
+     * @return price the price in the feed's native decimals
+     * @return feedDecimals the number of decimals the feed reports
+     */
+    function _latestEthUsd() internal view returns (uint256 price, uint8 feedDecimals) {
+        (, int256 answer, , uint256 updatedAt, ) = priceFeed.latestRoundData();
+        if (answer <= 0) revert InvalidPrice();
+        if (updatedAt == 0 || block.timestamp - updatedAt > PRICE_STALENESS) revert StalePrice();
+        price = uint256(answer);
+        feedDecimals = priceFeed.decimals();
+    }
+
+    /**
+     * @notice Quotes how many CHIP a given ETH amount would buy at the current price.
+     */
+    function quoteChipsForEth(uint256 ethAmount) external view returns (uint256) {
+        (uint256 price, uint8 feedDecimals) = _latestEthUsd();
+        return (ethAmount * price) / (10 ** feedDecimals);
+    }
+
+    /**
+     * @notice Quotes how much ETH a given CHIP amount would redeem at the current price.
+     */
+    function quoteEthForChips(uint256 chipAmount) external view returns (uint256) {
+        (uint256 price, uint8 feedDecimals) = _latestEthUsd();
+        return (chipAmount * (10 ** feedDecimals)) / price;
     }
 
     // =============================================================
@@ -423,6 +636,46 @@ contract BlackjackV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         game.finished = true;
         activeGame[game.player.addr] = 0;
         emit GameStopped(gameId, game.player.addr);
+    }
+
+    /**
+     * @notice Updates the Chainlink VRF request parameters.
+     * @dev Only callable by the owner. Lets the owner tune the gas lane, subscription,
+     *      callback gas, confirmations and payment token without redeploying.
+     */
+    function setVrfConfig(
+        bytes32 keyHash,
+        uint256 subscriptionId,
+        uint32 callbackGasLimit,
+        uint16 requestConfirmations,
+        bool nativePayment
+    ) external onlyOwner {
+        s_keyHash = keyHash;
+        s_subscriptionId = subscriptionId;
+        s_callbackGasLimit = callbackGasLimit;
+        s_requestConfirmations = requestConfirmations;
+        s_nativePayment = nativePayment;
+        emit VrfConfigUpdated(keyHash, subscriptionId, callbackGasLimit, requestConfirmations, nativePayment);
+    }
+
+    /**
+     * @notice Updates the VRF coordinator address (e.g. after a coordinator migration).
+     * @dev Only callable by the owner.
+     */
+    function setCoordinator(address vrfCoordinator) external onlyOwner {
+        if (vrfCoordinator == address(0)) revert ZeroAddress();
+        s_vrfCoordinator = IVRFCoordinatorV2Plus(vrfCoordinator);
+        emit CoordinatorUpdated(vrfCoordinator);
+    }
+
+    /**
+     * @notice Updates the ETH/USD price feed address.
+     * @dev Only callable by the owner.
+     */
+    function setPriceFeed(address ethUsdPriceFeed) external onlyOwner {
+        if (ethUsdPriceFeed == address(0)) revert ZeroAddress();
+        priceFeed = AggregatorV3Interface(ethUsdPriceFeed);
+        emit PriceFeedUpdated(ethUsdPriceFeed);
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}

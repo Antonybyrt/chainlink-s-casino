@@ -1,373 +1,420 @@
-import { useState, useEffect, useRef } from "react";
-import { useWaitForTransactionReceipt, useAccount, useReadContract, useWriteContract } from "wagmi";
-import { ErrorService } from "@/service/error.service";
+import { useState, useRef } from "react";
 import {
+    formatUnits,
+    parseEther,
+    parseUnits,
+    decodeEventLog,
+    maxUint256,
+    zeroAddress,
+    type Log,
+} from "viem";
+import { useConnection } from "wagmi";
+import { waitForTransactionReceipt } from "@wagmi/core";
+import {
+    blackjackAbi,
+    useReadBlackjackPlayers,
     useWriteBlackjackNewGame,
     useWriteBlackjackRegister,
-    useReadBlackjackPlayers,
+    useWriteBlackjackBuyChips,
     useWriteBlackjackHit,
-    useWriteBlackjackDeposit,
     useWriteBlackjackDoubleBet,
     useWriteBlackjackStand,
     useWriteBlackjackSplit,
-}
-    from "./generatedContracts";
-import { fetchCardDealtEvents, fetchDealerActionEvents, fetchGameResolvedEvents } from "@/lib/utils";
-import { contract } from "@/config/ethers.config";
-import { usePublicClient } from "wagmi";
-import { ethers } from "ethers";
+    useWriteBlackjackCashOut,
+    useReadCasinoChipBalanceOf,
+    useReadCasinoChipAllowance,
+    useWriteCasinoChipApprove,
+    useWatchBlackjackCardDealtEvent,
+    useWatchBlackjackGameResolvedEvent,
+} from "./generatedContracts";
+import { config } from "@/lib/client";
+import { ErrorService } from "@/service/error.service";
 
+const BLACKJACK_ADDRESS = process.env.NEXT_PUBLIC_BLACKJACK as `0x${string}`;
+const CHIP_DECIMALS = 18;
+const OUTCOMES = ["Lost", "Push", "Win", "Split"] as const;
+
+/**
+ * Game hook for the async (Chainlink VRF) + ERC20-CHIP Blackjack contract.
+ *
+ * Money: bets are escrowed in CHIP (ERC20) via `newGame` -> `transferFrom`, so the
+ * player must `approve` the game contract once. The playable balance is the wallet's
+ * CHIP balance (`balanceOf`), not an internal ETH bankroll.
+ *
+ * Cards: `newGame` is asynchronous — it only requests randomness and emits
+ * `RandomnessRequested(gameId, …)`. The initial hand (`CardDealt` events) and any
+ * resolution (`GameResolved`) arrive in a later VRF-fulfillment transaction. We read
+ * them with wagmi event watchers keyed on the current `gameId`, which also covers the
+ * synchronous draws from `hit`/`stand`/`double`/`split`.
+ */
 export const useBlackjack = () => {
-    const { isConnected, connector, address } = useAccount();
+    const { address } = useConnection();
 
-    const { writeContractAsync: writeNewGame, data: newGameHash, isPending: isNewGamePending } = useWriteBlackjackNewGame();
-    const { writeContractAsync: writeRegister, data: registerHash, isPending: isRegisterPending } = useWriteBlackjackRegister();
-    const { writeContractAsync: writeHit, data: hitHash, isPending: isHitPending } = useWriteBlackjackHit();
-    const { writeContractAsync: writeDeposit, data: depositHash, isPending: isDepositPending } = useWriteBlackjackDeposit();
-    const { writeContractAsync: writeDouble, data: doubleHash, isPending: isDoublePending } = useWriteBlackjackDoubleBet();
-    const { writeContractAsync: writeStand, data: standHash, isPending: isStandPending } = useWriteBlackjackStand();
-    const { writeContractAsync: writeSplit, data: splitHash, isPending: isSplitPending } = useWriteBlackjackSplit();
-    
-    const { isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash: newGameHash || registerHash || hitHash || depositHash || doubleHash || standHash || splitHash });
-    const { data: playerData, refetch: refetchPlayerData } = useReadBlackjackPlayers({ 
-        args: [address || '0x0000000000000000000000000000000000000000']
+    // ----- reads -----
+    const { data: chipBalance, refetch: refetchChip } = useReadCasinoChipBalanceOf({
+        args: [address ?? zeroAddress],
+        query: { enabled: !!address, refetchInterval: 8000 },
     });
-    const publicClient = usePublicClient();
+    const { data: allowance, refetch: refetchAllowance } = useReadCasinoChipAllowance({
+        args: [address ?? zeroAddress, BLACKJACK_ADDRESS],
+        query: { enabled: !!address },
+    });
+    const { data: playerData, refetch: refetchPlayer } = useReadBlackjackPlayers({
+        args: [address ?? zeroAddress],
+        query: { enabled: !!address },
+    });
 
+    // ----- writes -----
+    const { mutateAsync: writeRegister, isPending: isRegisterPending } = useWriteBlackjackRegister();
+    const { mutateAsync: writeBuyChips, isPending: isBuyPending } = useWriteBlackjackBuyChips();
+    const { mutateAsync: writeApprove } = useWriteCasinoChipApprove();
+    const { mutateAsync: writeNewGame, isPending: isNewGamePending } = useWriteBlackjackNewGame();
+    const { mutateAsync: writeHit, isPending: isHitPending } = useWriteBlackjackHit();
+    const { mutateAsync: writeDouble, isPending: isDoublePending } = useWriteBlackjackDoubleBet();
+    const { mutateAsync: writeStand, isPending: isStandPending } = useWriteBlackjackStand();
+    const { mutateAsync: writeSplit, isPending: isSplitPending } = useWriteBlackjackSplit();
+    const { mutateAsync: writeCashOut, isPending: isCashOutPending } = useWriteBlackjackCashOut();
+
+    // ----- game state -----
+    const [gameId, setGameId] = useState<number | null>(null);
     const [playerCards, setPlayerCards] = useState<number[]>([]);
     const [dealerCards, setDealerCards] = useState<number[]>([]);
-    const [isRegistered, setIsRegistered] = useState(false);
-    const [casinoBalance, setCasinoBalance] = useState<number>(0);
-    const [gameStarted, setGameStarted] = useState(false);
-    const [currentBet, setCurrentBet] = useState<number | null>(null);
-    const [gameId, setGameId] = useState<number | null>(null);
-    const [isGameOver, setIsGameOver] = useState(false);
-    const [gameResult, setGameResult] = useState<{outcome: "Win" | "Push" | "Lost" | "Split", winPercentage: number, totalPayout: number} | null>(null);
     const [splitCards, setSplitCards] = useState<number[]>([]);
     const [isSplit, setIsSplit] = useState(false);
-    const [activeSplitHand, setActiveSplitHand] = useState(false);
+    const [isWaitingForCards, setIsWaitingForCards] = useState(false);
+    const [gameStarted, setGameStarted] = useState(false);
+    const [isGameOver, setIsGameOver] = useState(false);
+    const [gameResult, setGameResult] = useState<{
+        outcome: "Win" | "Push" | "Lost" | "Split";
+        winPercentage: number;
+        totalPayout: number;
+    } | null>(null);
+    const [currentBet, setCurrentBet] = useState<number | null>(null);
 
-    const processedTransactions = useRef(new Set<string>());
+    const processedLogs = useRef<Set<string>>(new Set());
 
-    useEffect(() => {
-        const handleTransactionConfirmation = async (hash: string) => {
-            if (processedTransactions.current.has(hash)) {
-                ErrorService.mixinMessage(`Transaction already processed`, "info");
-                return;
-            }
+    // ----- derived -----
+    const isRegistered = !!playerData && (playerData as readonly unknown[])[0] !== zeroAddress;
+    const casinoBalance = chipBalance ? Number(formatUnits(chipBalance as bigint, CHIP_DECIMALS)) : 0;
 
-            ErrorService.mixinMessage(`Transaction confirmed`, "success");
-            if (!publicClient) {
-                console.error("PublicClient is not available");
-                return;
-            }
-
-            try {
-                const receipt = await publicClient.waitForTransactionReceipt({ 
-                    hash: hash as `0x${string}`,
-                    timeout: 30_000
-                });
-                
-                if (!receipt) {
-                    throw new Error("No receipt received");
-                }
-
-                processedTransactions.current.add(hash);
-
-                if (hash === registerHash) {
-                    setPlayerCards([]);
-                    setDealerCards([]);
-                    if (address) {
-                        setTimeout(async () => {
-                            try {
-                                await refetchPlayerData();
-                            } catch (error) {
-                                console.error("Error refreshing player data:", error);
-                            }
-                        }, 2000);
-                    }
-                    return;
-                }
-
-                if (hash === depositHash) {
-                    if (address) {
-                        setTimeout(async () => {
-                            try {
-                                await refetchPlayerData();
-                            } catch (error) {
-                                console.error("Error refreshing player data:", error);
-                            }
-                        }, 2000);
-                    }
-                    return;
-                }
-
-                const blockNumber = Number(receipt.blockNumber);
-
-                if (hash === newGameHash) {
-                    await fetchCardDealtEvents(
-                        contract,
-                        blockNumber,
-                        setPlayerCards,
-                        setDealerCards,
-                        setGameId,
-                        setGameStarted,
-                        false,
-                        setSplitCards
-                    );
-                    await fetchGameResolvedEvents(contract, blockNumber, setGameResult, setIsGameOver);
-                } else if (hash === hitHash || hash === doubleHash) {
-                    await fetchCardDealtEvents(
-                        contract,
-                        blockNumber,
-                        setPlayerCards,
-                        setDealerCards,
-                        setGameId,
-                        setGameStarted,
-                        true,
-                        setSplitCards
-                    );
-                    await fetchGameResolvedEvents(contract, blockNumber, setGameResult, setIsGameOver);
-                } else if (hash === standHash) {
-                    await fetchCardDealtEvents(
-                        contract,
-                        blockNumber,
-                        setPlayerCards,
-                        setDealerCards,
-                        setGameId,
-                        setGameStarted,
-                        false,
-                        setSplitCards
-                    );
-                    await fetchDealerActionEvents(contract, blockNumber, setIsGameOver);
-                    await fetchGameResolvedEvents(contract, blockNumber, setGameResult, setIsGameOver);
-                } else if (hash === splitHash) {
-                    setIsSplit(true);
-                    
-                    setPlayerCards(prev => [prev[0]]);
-                    setSplitCards(prev => [...prev, playerCards[1]]);
-                    
-                    await fetchCardDealtEvents(
-                        contract,
-                        blockNumber,
-                        setPlayerCards,
-                        setDealerCards,
-                        setGameId,
-                        setGameStarted,
-                        true,
-                        setSplitCards
-                    );
-                    await fetchGameResolvedEvents(contract, blockNumber, setGameResult, setIsGameOver);
-                }
-            } catch (error) {
-                console.error("Error processing transaction:", error);
-                if (error instanceof Error && error.message.includes("Timed out")) {
-                    ErrorService.mixinMessage("Transaction is taking longer than expected. Please wait or refresh the page.", "warning");
-                } else {
-                    ErrorService.mixinMessage("Error processing transaction", "error");
-                }
-            }
-        };
-
-        if (newGameHash && !processedTransactions.current.has(newGameHash)) {
-            handleTransactionConfirmation(newGameHash);
-        }
-        if (hitHash && !processedTransactions.current.has(hitHash)) {
-            handleTransactionConfirmation(hitHash);
-        }
-        if (registerHash && !processedTransactions.current.has(registerHash)) {
-            handleTransactionConfirmation(registerHash);
-        }
-        if (depositHash && !processedTransactions.current.has(depositHash)) {
-            handleTransactionConfirmation(depositHash);
-        }
-        if (doubleHash && !processedTransactions.current.has(doubleHash)) {
-            handleTransactionConfirmation(doubleHash);
-        }
-        if (standHash && !processedTransactions.current.has(standHash)) {
-            handleTransactionConfirmation(standHash);
-        }
-        if (splitHash && !processedTransactions.current.has(splitHash)) {
-            handleTransactionConfirmation(splitHash);
-        }
-    }, [newGameHash, hitHash, registerHash, depositHash, doubleHash, standHash, splitHash, contract, publicClient, address, refetchPlayerData]);
-
-    useEffect(() => {
-        if (playerData) {
-            const [playerAddr, balance] = playerData;
-            setIsRegistered(playerAddr !== '0x0000000000000000000000000000000000000000');
-            if (balance !== undefined) {
-                setCasinoBalance(Number(balance) / 10**18);
-            } else {
-                setCasinoBalance(0);
-            }
+    // ----- shared log appliers (used by both the watcher and tx receipts) -----
+    const applyCardDealt = (
+        txHash: string,
+        logIndex: number,
+        receiver: string | undefined,
+        card: number,
+        splitHand: boolean,
+    ) => {
+        const key = `card:${txHash}:${logIndex}`;
+        if (processedLogs.current.has(key)) return;
+        processedLogs.current.add(key);
+        if (receiver === zeroAddress) {
+            setDealerCards((prev) => [...prev, card]);
+        } else if (splitHand) {
+            setSplitCards((prev) => [...prev, card]);
         } else {
-            setCasinoBalance(0);
+            setPlayerCards((prev) => [...prev, card]);
         }
-    }, [playerData]);
+        setIsWaitingForCards(false);
+        setGameStarted(true);
+    };
 
-    const register = async (amount: number) => {
-        if (!isConnected) {
-            await connector?.connect();
+    const applyResolved = (
+        txHash: string,
+        logIndex: number,
+        outcomeIdx: number,
+        winPercentage: number,
+        payoutWei: bigint,
+    ) => {
+        const key = `res:${txHash}:${logIndex}`;
+        if (processedLogs.current.has(key)) return;
+        processedLogs.current.add(key);
+        setGameResult({
+            outcome: OUTCOMES[outcomeIdx],
+            winPercentage,
+            totalPayout: Number(formatUnits(payoutWei, CHIP_DECIMALS)),
+        });
+        setIsGameOver(true);
+        setIsWaitingForCards(false);
+        refetchChip();
+    };
+
+    // Synchronous actions (hit/stand/double/split) resolve in their own tx: decode
+    // that receipt's logs directly instead of relying on the polling watcher.
+    const applyReceiptLogs = (logs: readonly Log[]) => {
+        for (const log of logs) {
+            let decoded;
+            try {
+                decoded = decodeEventLog({ abi: blackjackAbi, data: log.data, topics: log.topics });
+            } catch {
+                continue; // not one of our events
+            }
+            const txHash = log.transactionHash ?? "";
+            const logIndex = log.logIndex ?? 0;
+            if (decoded.eventName === "CardDealt") {
+                const a = decoded.args as { receiver: string; card: number | bigint; splitHand: boolean };
+                applyCardDealt(txHash, logIndex, a.receiver, Number(a.card), Boolean(a.splitHand));
+            } else if (decoded.eventName === "GameResolved") {
+                const a = decoded.args as { outcome: number; winPercentage: bigint; totalPayout: bigint };
+                applyResolved(txHash, logIndex, Number(a.outcome), Number(a.winPercentage), a.totalPayout);
+            }
         }
-        ErrorService.mixinMessage("Registering...", "info");
+    };
 
+    // ----- event watcher: catches the async VRF initial deal -----
+    useWatchBlackjackCardDealtEvent({
+        args: gameId != null ? { gameId: BigInt(gameId) } : undefined,
+        enabled: gameId != null,
+        onLogs(logs) {
+            for (const log of logs) {
+                applyCardDealt(
+                    (log.transactionHash as string) ?? "",
+                    (log.logIndex as number) ?? 0,
+                    log.args.receiver as string | undefined,
+                    Number(log.args.card),
+                    Boolean(log.args.splitHand),
+                );
+            }
+        },
+    });
+
+    useWatchBlackjackGameResolvedEvent({
+        args: gameId != null ? { gameId: BigInt(gameId) } : undefined,
+        enabled: gameId != null,
+        onLogs(logs) {
+            for (const log of logs) {
+                applyResolved(
+                    (log.transactionHash as string) ?? "",
+                    (log.logIndex as number) ?? 0,
+                    Number(log.args.outcome),
+                    Number(log.args.winPercentage),
+                    log.args.totalPayout as bigint,
+                );
+            }
+        },
+    });
+
+    // ----- helpers -----
+    const resetLocalHands = () => {
+        setPlayerCards([]);
+        setDealerCards([]);
+        setSplitCards([]);
+        setIsSplit(false);
+        setIsGameOver(false);
+        setGameResult(null);
+        processedLogs.current = new Set();
+    };
+
+    const ensureApproval = async (needed: bigint) => {
+        const current = (allowance as bigint | undefined) ?? BigInt(0);
+        if (current >= needed) return;
+        const approveHash = await writeApprove({ args: [BLACKJACK_ADDRESS, maxUint256] });
+        await waitForTransactionReceipt(config, { hash: approveHash });
+        await refetchAllowance();
+    };
+
+    // ----- actions -----
+
+    /** Register the player; any ETH sent is converted to CHIP (minted to the wallet). */
+    const register = async (ethAmount: number) => {
         try {
-            const amountInMutez = BigInt(amount * 10**18);
-            await writeRegister({ value: amountInMutez });
-        } catch(err: any) {
-            if (err.message.includes("User rejected the request")) {
+            const hash = await writeRegister({ value: parseEther(String(ethAmount)) });
+            await waitForTransactionReceipt(config, { hash });
+            await Promise.all([refetchPlayer(), refetchChip()]);
+        } catch (err: any) {
+            if (err?.message?.includes("User rejected")) {
                 ErrorService.mixinMessage("Transaction cancelled. Please try again.", "warning");
             } else {
                 ErrorService.mixinMessage("Error while registering", "error");
-                console.log(err);
+                console.error(err);
             }
         }
     };
 
-    const deposit = async (amount: number) => {
-        if (!isConnected) {
-            await connector?.connect();
-        }
-        ErrorService.mixinMessage("Sending funds...", "info");
-
+    /** Buy more CHIP with ETH (ETH -> USD via price feed -> CHIP minted to the wallet). */
+    const buyChips = async (ethAmount: number) => {
         try {
-            const amountInMutez = BigInt(amount * 10**18);
-            await writeDeposit({ value: amountInMutez });
-        } catch(err: any) {
-            if (err.message.includes("User rejected the request")) {
+            const hash = await writeBuyChips({ value: parseEther(String(ethAmount)) });
+            await waitForTransactionReceipt(config, { hash });
+            await refetchChip();
+        } catch (err: any) {
+            if (err?.message?.includes("User rejected")) {
                 ErrorService.mixinMessage("Transaction cancelled. Please try again.", "warning");
             } else {
-                ErrorService.mixinMessage("Error while sending funds", "error");
-                console.log(err);
+                ErrorService.mixinMessage("Error while buying chips", "error");
+                console.error(err);
             }
         }
-    }
+    };
 
+    // kept name for API compatibility; buying chips == depositing ETH
+    const deposit = buyChips;
+
+    /** Redeem CHIP back to ETH at the current price. */
+    const cashOut = async (chipAmount: number) => {
+        try {
+            const hash = await writeCashOut({ args: [parseUnits(String(chipAmount), CHIP_DECIMALS)] });
+            await waitForTransactionReceipt(config, { hash });
+            await refetchChip();
+            ErrorService.mixinMessage("Chips cashed out", "success");
+        } catch (err: any) {
+            ErrorService.mixinMessage("Error while cashing out", "error");
+            console.error(err);
+        }
+    };
+
+    /** Start a game: approve if needed, escrow the bet, request VRF randomness. */
     const newGame = async (bet: number) => {
-        if (!isConnected) {
-            await connector?.connect();
-        }
-        ErrorService.mixinMessage("Starting a new game...", "info");
-
+        if (!address) return;
+        const betWei = parseUnits(String(bet), CHIP_DECIMALS);
         try {
-            const betInMutez = BigInt(bet * 10**18);
-            await writeNewGame({ args: [betInMutez] })
+            await ensureApproval(betWei);
+
+            resetLocalHands();
             setCurrentBet(bet);
-            setGameResult(null);
-            setIsGameOver(false);
-        } catch(err: any) {
-            if (err.message.includes("User rejected the request")) {
+
+            const hash = await writeNewGame({ args: [betWei] });
+            const receipt = await waitForTransactionReceipt(config, { hash });
+
+            // Decode the gameId from the RandomnessRequested event, then wait for VRF.
+            let gid: bigint | null = null;
+            for (const log of receipt.logs) {
+                try {
+                    const decoded = decodeEventLog({
+                        abi: blackjackAbi,
+                        data: log.data,
+                        topics: log.topics,
+                    });
+                    if (decoded.eventName === "RandomnessRequested") {
+                        gid = (decoded.args as { gameId: bigint }).gameId;
+                        break;
+                    }
+                } catch {
+                    /* not one of our events */
+                }
+            }
+            if (gid != null) {
+                processedLogs.current = new Set();
+                setGameId(Number(gid));
+                setIsWaitingForCards(true);
+            }
+            await refetchChip();
+        } catch (err: any) {
+            setIsWaitingForCards(false);
+            if (err?.message?.includes("User rejected")) {
                 ErrorService.mixinMessage("Transaction cancelled. Please try again.", "warning");
             } else {
-                ErrorService.mixinMessage("Erreur lors du démarrage d'une nouvelle partie", "error");
-                console.log(err);
+                ErrorService.mixinMessage("Error starting a new game", "error");
+                console.error(err);
             }
         }
     };
 
-    const hit = async (gameId: number, splitHand: boolean) => {
-        if (!isConnected) {
-            await connector?.connect();
-        }
-        ErrorService.mixinMessage("Hitting a new card...", "info");
-
+    const hit = async (id: number, splitHand: boolean) => {
         try {
-            await writeHit({ args: [BigInt(gameId), splitHand] })
-        } catch(err: any) {
-            if (err.message.includes("User rejected the request")) {
-                ErrorService.mixinMessage("Transaction cancelled. Please try again.", "warning");
-            } else {
+            const hash = await writeHit({ args: [BigInt(id), splitHand] });
+            const receipt = await waitForTransactionReceipt(config, { hash });
+            applyReceiptLogs(receipt.logs);
+        } catch (err: any) {
+            if (!err?.message?.includes("User rejected")) {
                 ErrorService.mixinMessage("Error while hitting", "error");
-                console.log(err);
             }
-
+            console.error(err);
         }
-    }
+    };
 
-    const double = async (gameId: number) => {
-        if (!isConnected) {
-            await connector?.connect();
-        }
-        ErrorService.mixinMessage("Double and hitting a card...", "info");
-
+    const double = async (id: number) => {
         try {
-            await writeDouble({ args: [BigInt(gameId)] })
-        } catch(err: any) {
-            if (err.message.includes("User rejected the request")) {
-                ErrorService.mixinMessage("Transaction cancelled. Please try again.", "warning");
-            } else {
-                ErrorService.mixinMessage("Error during the double...", "error");
-                console.log(err);
+            // double escrows an extra bet; MaxUint256 approval from newGame already covers it
+            const hash = await writeDouble({ args: [BigInt(id)] });
+            const receipt = await waitForTransactionReceipt(config, { hash });
+            applyReceiptLogs(receipt.logs);
+            await refetchChip();
+        } catch (err: any) {
+            if (!err?.message?.includes("User rejected")) {
+                ErrorService.mixinMessage("Error during the double", "error");
             }
+            console.error(err);
         }
-    }
+    };
 
-    const stand = async (gameId: number) => {
-        if (!isConnected) {
-            await connector?.connect();
-        }
-        ErrorService.mixinMessage("Standing...", "info");
-
+    const stand = async (id: number) => {
         try {
-            await writeStand({ args: [BigInt(gameId)] })
-        } catch(err: any) {
-            if (err.message.includes("User rejected the request")) {
-                ErrorService.mixinMessage("Transaction cancelled. Please try again.", "warning");
-            } else {
-                ErrorService.mixinMessage("Error during stand...", "error");
-                console.log(err);
+            const hash = await writeStand({ args: [BigInt(id)] });
+            const receipt = await waitForTransactionReceipt(config, { hash });
+            applyReceiptLogs(receipt.logs);
+        } catch (err: any) {
+            if (!err?.message?.includes("User rejected")) {
+                ErrorService.mixinMessage("Error during stand", "error");
             }
+            console.error(err);
         }
-    }
+    };
 
-    const split = async (gameId: number) => {
-        if (!gameId) {
-            throw new Error('No game in progress');
-        }
+    const split = async (id: number) => {
+        if (!id) throw new Error("No game in progress");
         try {
-            await writeSplit({ args: [BigInt(gameId)] });
+            // The contract keeps the first card in the main hand and moves the second
+            // card to the split hand without re-emitting it, so mirror that locally.
+            const secondCard = playerCards[1];
             setIsSplit(true);
-        } catch (error) {
-            console.error('Error splitting:', error);
-            throw error;
+            setPlayerCards((prev) => prev.slice(0, 1));
+            setSplitCards(secondCard !== undefined ? [secondCard] : []);
+            const hash = await writeSplit({ args: [BigInt(id)] });
+            const receipt = await waitForTransactionReceipt(config, { hash });
+            applyReceiptLogs(receipt.logs);
+            await refetchChip();
+        } catch (err: any) {
+            if (!err?.message?.includes("User rejected")) {
+                ErrorService.mixinMessage("Error while splitting", "error");
+            }
+            console.error(err);
         }
     };
 
     const resetGame = () => {
-        setPlayerCards([]);
-        setDealerCards([]);
+        resetLocalHands();
         setGameStarted(false);
         setCurrentBet(null);
         setGameId(null);
-        setIsGameOver(false);
-        setGameResult(null);
-        setSplitCards([]);
-        setIsSplit(false);
-        refetchPlayerData();
+        setIsWaitingForCards(false);
+        refetchChip();
+        refetchPlayer();
     };
 
-    return { 
-        isPending: isNewGamePending || isRegisterPending || isHitPending || isDepositPending || isDoublePending || isStandPending || isSplitPending,
+    const isPending =
+        isRegisterPending ||
+        isBuyPending ||
+        isNewGamePending ||
+        isHitPending ||
+        isDoublePending ||
+        isStandPending ||
+        isSplitPending ||
+        isCashOutPending;
+
+    return {
+        isPending,
+        isWaitingForCards,
         newGame,
         deposit,
+        buyChips,
+        cashOut,
         register,
         hit,
         double,
         stand,
         split,
         gameId,
-        playerCards, 
+        playerCards,
         dealerCards,
         isRegistered,
         casinoBalance,
-        isConfirmed,
         gameStarted,
         currentBet,
         resetGame,
         isGameOver,
         gameResult,
         splitCards,
-        isSplit
+        isSplit,
     };
 };

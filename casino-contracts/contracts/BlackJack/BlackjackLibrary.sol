@@ -61,16 +61,19 @@ library BlackjackLibrary {
     }
 
     /**
-     * @notice internal function to shuffle a deck
+     * @notice shuffles a 52-card deck deterministically from a single random seed
+     * @dev the seed is expanded into per-index randomness with keccak256, so a single
+     *      Chainlink VRF word yields an unbiased Fisher-Yates shuffle
+     * @param seed the random seed provided by Chainlink VRF
      * @return deck array which represents the shuffled deck
      */
-    function _createShuffledDeck() internal view returns (uint8[] memory) {
+    function _createShuffledDeck(uint256 seed) internal pure returns (uint8[] memory) {
         uint8[] memory deck = new uint8[](52);
         for (uint8 i = 0; i < 52; i++) {
             deck[i] = i;
         }
         for (uint8 i = 0; i < 52; i++) {
-            uint256 n = i + uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, i))) % (52 - i);
+            uint256 n = i + (uint256(keccak256(abi.encode(seed, i))) % (52 - i));
             uint8 temp = deck[i];
             deck[i] = deck[uint8(n)];
             deck[uint8(n)] = temp;
@@ -79,30 +82,26 @@ library BlackjackLibrary {
     }
 
     /**
-     * @notice starts a new game for a registered player
-     * @dev the player must indicate his bet, two cards are distributed to the player and dealer, natural Blackjack calculated
-     * @param bet the bet of the player
-     * @return newGameId the id of the game created
+     * @notice reserves a new game for a registered player
+     * @dev the bet (in CHIP) is escrowed by the caller (the game contract) before this
+     *      runs; no internal balance is debited here. The deck is NOT shuffled and no
+     *      card is dealt: the game waits for the Chainlink VRF callback (dealInitialCards)
+     *      which supplies the random seed. The game stage is set to WaitingForRandomness.
+     * @param bet the bet of the player (in CHIP)
+     * @param newGameId the id assigned to the game being created
      */
-    function newGame(
+    function startGame(
         uint256 bet,
-        uint256 gameIdCounter,
+        uint256 newGameId,
         mapping(uint256 => Game) storage games,
-        mapping(address => Player) storage players,
         mapping(address => uint256) storage activeGame
-    ) public returns (uint256 newGameId) {
+    ) public {
 
-        players[msg.sender].balance -= bet;
-        
-        newGameId = gameIdCounter;
-        
-        uint8[] memory deck = _createShuffledDeck();
-        
         Game storage game = games[newGameId];
         game.id = newGameId;
         game.startTime = block.timestamp;
-        game.stage = Stage.PlayHand;
-        
+        game.stage = Stage.WaitingForRandomness;
+
         game.dealer.addr = address(0);
         game.dealer.balance = 0;
         game.dealer.bet = 0;
@@ -110,15 +109,15 @@ library BlackjackLibrary {
         delete game.dealer.splitHand;
         game.dealer.hasSplit = false;
         game.dealer.isStanding = false;
-        
+
         game.player.addr = msg.sender;
-        game.player.balance = players[msg.sender].balance;
+        game.player.balance = 0;
         game.player.bet = bet;
         delete game.player.hand;
         delete game.player.splitHand;
         game.player.hasSplit = false;
         game.player.isStanding = false;
-        
+
         game.splitPlayer.addr = address(0);
         game.splitPlayer.balance = 0;
         game.splitPlayer.bet = 0;
@@ -126,47 +125,69 @@ library BlackjackLibrary {
         delete game.splitPlayer.splitHand;
         game.splitPlayer.hasSplit = false;
         game.splitPlayer.isStanding = false;
-        
-        game.deck = deck;
+
+        delete game.deck;
         game.currentCardIndex = 0;
         game.finished = false;
-        
+
         activeGame[msg.sender] = newGameId;
-        
+    }
+
+    /**
+     * @notice shuffles the deck with the VRF seed and deals the initial hands
+     * @dev called from the Chainlink VRF callback, so msg.sender is the coordinator:
+     *      the player address is always read from game.player.addr, never msg.sender.
+     *      Two cards go to the player and two to the dealer, then a natural Blackjack
+     *      is resolved immediately. Money is not moved here: the CHIP payout to credit
+     *      is returned to the game contract, which performs the transfer.
+     * @param seed the random seed provided by Chainlink VRF
+     * @param gameId the id of the game to deal
+     * @return payout the amount of CHIP owed to the player (0 unless a natural Blackjack)
+     */
+    function dealInitialCards(
+        uint256 seed,
+        uint256 gameId,
+        mapping(uint256 => Game) storage games,
+        mapping(address => uint256) storage activeGame
+    ) public returns (uint256 payout) {
+        Game storage game = games[gameId];
+        address player = game.player.addr;
+        uint256 bet = game.player.bet;
+
+        game.deck = _createShuffledDeck(seed);
+        game.currentCardIndex = 0;
+        game.stage = Stage.PlayHand;
+
         game.player.hand.push(game.deck[game.currentCardIndex]);
-        emit CardDealt(newGameId, game.player.addr, game.deck[game.currentCardIndex], false);
+        emit CardDealt(gameId, player, game.deck[game.currentCardIndex], false);
         game.currentCardIndex++;
         game.player.hand.push(game.deck[game.currentCardIndex]);
-        emit CardDealt(newGameId, game.player.addr, game.deck[game.currentCardIndex], false);
+        emit CardDealt(gameId, player, game.deck[game.currentCardIndex], false);
         game.currentCardIndex++;
-        
+
         game.dealer.hand.push(game.deck[game.currentCardIndex]);
-        emit CardDealt(newGameId, address(0), game.deck[game.currentCardIndex], false);
+        emit CardDealt(gameId, address(0), game.deck[game.currentCardIndex], false);
         game.currentCardIndex++;
         game.dealer.hand.push(game.deck[game.currentCardIndex]);
-        emit CardDealt(newGameId, address(0), game.deck[game.currentCardIndex], false);
+        emit CardDealt(gameId, address(0), game.deck[game.currentCardIndex], false);
         game.currentCardIndex++;
-        
+
+        emit NewGame(gameId, player, bet);
+
         bool playerBJ = checkBlackjack(game.player.hand);
         bool dealerBJ = checkBlackjack(game.dealer.hand);
         if (playerBJ) {
             game.stage = Stage.ConcludeHands;
             game.finished = true;
-            activeGame[msg.sender] = 0;
-            Outcome outcome;
+            activeGame[player] = 0;
             if (dealerBJ) {
-                players[msg.sender].balance += bet;
-                outcome = Outcome.Push;
-                emit NewGame(newGameId, msg.sender, bet);
-                emit GameResolved(newGameId, game.player.addr, outcome, 0, bet);
+                payout = bet; // refund the escrowed bet (push)
+                emit GameResolved(gameId, player, Outcome.Push, 0, bet);
             } else {
                 uint256 winnings = (bet * 3) / 2;
-                players[msg.sender].balance += bet + winnings;
-                outcome = Outcome.Win;
-                emit NewGame(newGameId, msg.sender, bet);
-                emit GameResolved(newGameId, game.player.addr, outcome, 50, winnings);
+                payout = bet + winnings; // 2.5x bet (3:2 blackjack)
+                emit GameResolved(gameId, player, Outcome.Win, 50, winnings);
             }
         }
-        return newGameId;
     }
 }

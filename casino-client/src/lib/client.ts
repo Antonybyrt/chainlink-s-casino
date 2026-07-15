@@ -3,7 +3,7 @@ import { createThirdwebClient } from "thirdweb";
 import { config as dotenvConf } from "dotenv";
 dotenvConf();
 import { http, createConfig } from '@wagmi/core'
-import { etherlinkTestnet } from '@wagmi/core/chains'
+import { sepolia } from '@wagmi/core/chains'
 
 const clientId = process.env.NEXT_PUBLIC_CLIENT_ID as string;
 
@@ -16,8 +16,8 @@ export const client = createThirdwebClient({
 });
 
 export const config = createConfig({
-  chains: [etherlinkTestnet],
+  chains: [sepolia],
   transports: {
-    [etherlinkTestnet.id]: http()
+    [sepolia.id]: http(process.env.NEXT_PUBLIC_SEPOLIA_RPC)
   },
 })

@@ -6,7 +6,8 @@ enum Stage {
     Bet,
     PlayHand,
     PlaySplitHand,
-    ConcludeHands
+    ConcludeHands,
+    WaitingForRandomness
 }
 
 enum Outcome {
