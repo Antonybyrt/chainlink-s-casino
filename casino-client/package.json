@@ -1,0 +1,43 @@
+{
+  "name": "casino-client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.6",
+    "@radix-ui/react-slot": "^1.1.2",
+    "@tanstack/react-query": "^5.69.0",
+    "@thirdweb-dev/react": "^4.9.4",
+    "@thirdweb-dev/sdk": "^4.0.99",
+    "@wagmi/core": "^2.16.7",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^16.4.7",
+    "elevenlabs": "^1.59.0",
+    "ethers": "^5.8.0",
+    "groq-sdk": "^0.37.0",
+    "lucide-react": "^0.483.0",
+    "next": "15.2.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sweetalert2": "^11.17.2",
+    "tailwind-merge": "^3.0.2",
+    "thirdweb": "^5.93.4",
+    "viem": "^2.23.15",
+    "wagmi": "^2.14.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19.0.12",
+    "@types/react-dom": "^19.0.4",
+    "@wagmi/cli": "^2.2.0",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

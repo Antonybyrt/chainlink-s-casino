@@ -1,0 +1,281 @@
+{
+  "manifestVersion": "3.2",
+  "proxies": [
+    {
+      "address": "0x73ceC40B1F39c311536e3fe1c88731210a24E518",
+      "txHash": "0xd8cd6ce59192ee75a0f4da0353735affac1d78d72476fbdd3c8f1b39fef024b4",
+      "kind": "uups"
+    }
+  ],
+  "impls": {
+    "987929f424be58b1c209b9a023d513e1cc4b966f09b63f226f36be069a5f8a82": {
+      "address": "0x693f241CC67082B8212dC2bDA1f56D549Bee6027",
+      "txHash": "0xeab88b19effdb56c5d4ea9bce069f81406de3f6d5aa0ad96f60aca647a1a5676",
+      "layout": {
+        "solcVersion": "0.8.22",
+        "storage": [
+          {
+            "label": "players",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_mapping(t_address,t_struct(Player)2223_storage)",
+            "contract": "BlackjackV1",
+            "src": "contracts/BlackJack/BlackjackV1.sol:42"
+          },
+          {
+            "label": "games",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_mapping(t_uint256,t_struct(Game)2247_storage)",
+            "contract": "BlackjackV1",
+            "src": "contracts/BlackJack/BlackjackV1.sol:43"
+          },
+          {
+            "label": "blacklist",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "BlackjackV1",
+            "src": "contracts/BlackJack/BlackjackV1.sol:44"
+          },
+          {
+            "label": "activeGame",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "BlackjackV1",
+            "src": "contracts/BlackJack/BlackjackV1.sol:45"
+          },
+          {
+            "label": "gameIdCounter",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_uint256",
+            "contract": "BlackjackV1",
+            "src": "contracts/BlackJack/BlackjackV1.sol:46"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_struct(InitializableStorage)73_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)13_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_array(t_uint8)dyn_storage": {
+            "label": "uint8[]",
+            "numberOfBytes": "32"
+          },
+          "t_enum(Stage)2202": {
+            "label": "enum Stage",
+            "members": [
+              "Bet",
+              "PlayHand",
+              "PlaySplitHand",
+              "ConcludeHands"
+            ],
+            "numberOfBytes": "1"
+          },
+          "t_mapping(t_address,t_bool)": {
+            "label": "mapping(address => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_struct(Player)2223_storage)": {
+            "label": "mapping(address => struct Player)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_uint256)": {
+            "label": "mapping(address => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_struct(Game)2247_storage)": {
+            "label": "mapping(uint256 => struct Game)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(Game)2247_storage": {
+            "label": "struct Game",
+            "members": [
+              {
+                "label": "id",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "startTime",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "stage",
+                "type": "t_enum(Stage)2202",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "dealer",
+                "type": "t_struct(Player)2223_storage",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "player",
+                "type": "t_struct(Player)2223_storage",
+                "offset": 0,
+                "slot": "9"
+              },
+              {
+                "label": "splitPlayer",
+                "type": "t_struct(Player)2223_storage",
+                "offset": 0,
+                "slot": "15"
+              },
+              {
+                "label": "deck",
+                "type": "t_array(t_uint8)dyn_storage",
+                "offset": 0,
+                "slot": "21"
+              },
+              {
+                "label": "currentCardIndex",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "22"
+              },
+              {
+                "label": "finished",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "23"
+              }
+            ],
+            "numberOfBytes": "768"
+          },
+          "t_struct(Player)2223_storage": {
+            "label": "struct Player",
+            "members": [
+              {
+                "label": "addr",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "balance",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "bet",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "hand",
+                "type": "t_array(t_uint8)dyn_storage",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "splitHand",
+                "type": "t_array(t_uint8)dyn_storage",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "hasSplit",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "isStanding",
+                "type": "t_bool",
+                "offset": 1,
+                "slot": "5"
+              }
+            ],
+            "numberOfBytes": "192"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint8": {
+            "label": "uint8",
+            "numberOfBytes": "1"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
