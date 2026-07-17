@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button';
+import { BalanceHistoryChart } from '@/components/blackjack/BalanceHistoryChart';
 import { ConnectButton } from 'thirdweb/react';
 import { sepolia } from 'thirdweb/chains';
 import { client } from '@/lib/client';
@@ -8,9 +9,10 @@ interface BlackjackHeaderProps {
   onRegisterClick: () => void;
   casinoBalance: number;
   onCashOut: () => void;
+  onBuyChipsClick: () => void;
 }
 
-export function BlackjackHeader({ isRegistered, onRegisterClick, casinoBalance, onCashOut }: BlackjackHeaderProps) {
+export function BlackjackHeader({ isRegistered, onRegisterClick, casinoBalance, onCashOut, onBuyChipsClick }: BlackjackHeaderProps) {
   return (
     <header className="bg-gray-900 border-b border-gray-800">
       <div className="container mx-auto px-8 py-4 flex items-center justify-between">
@@ -22,6 +24,15 @@ export function BlackjackHeader({ isRegistered, onRegisterClick, casinoBalance, 
         </div>
 
         <div className="flex items-center gap-4">
+          <BalanceHistoryChart />
+          {isRegistered && (
+            <Button
+              onClick={onBuyChipsClick}
+              className="bg-emerald-500 hover:bg-emerald-600 text-black"
+            >
+              Buy chips
+            </Button>
+          )}
           {isRegistered && casinoBalance > 0 && (
             <Button
               onClick={onCashOut}

@@ -67,6 +67,7 @@ function BlackjackComponent() {
 
   const [balance, setBalance] = useState(balanceData ? Number(formatUnits(balanceData.value, balanceData.decimals)) : 0);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
+  const [isBuyChipsModalOpen, setIsBuyChipsModalOpen] = useState(false);
   const [pendingBet, setPendingBet] = useState(0);
   const [playerTotal, setPlayerTotal] = useState(0);
   const [splitTotal, setSplitTotal] = useState(0);
@@ -247,7 +248,8 @@ function BlackjackComponent() {
   const handleDeposit = async (amount: number) => {
     try {
       await deposit(amount);
-      setBalance(balance + amount);
+      setBalance(balance - amount); // ETH spent to mint CHIP; refreshed by useBalance anyway
+      setIsBuyChipsModalOpen(false);
     } catch (error) {
       console.error('Error depositing:', error);
       ErrorService.mixinMessage("Error while depositing funds", "error");
@@ -331,6 +333,7 @@ function BlackjackComponent() {
         onCashOut={() => {
           if (casinoBalance > 0) cashOut(casinoBalance);
         }}
+        onBuyChipsClick={() => setIsBuyChipsModalOpen(true)}
       />
 
       {/* Wooden rim */}
@@ -515,6 +518,17 @@ function BlackjackComponent() {
         onRegister={handleRegister}
         balance={balance}
         isPending={isPending}
+      />
+
+      <RegisterModal
+        isOpen={isBuyChipsModalOpen}
+        onClose={() => setIsBuyChipsModalOpen(false)}
+        onRegister={handleDeposit}
+        balance={balance}
+        isPending={isPending}
+        title="Buy chips"
+        description="Deposit ETH to mint more CHIP to your wallet, converted at the current ETH/USD price."
+        submitLabel="Buy chips"
       />
     </div>
   );

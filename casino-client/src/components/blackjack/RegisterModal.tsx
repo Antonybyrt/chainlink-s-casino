@@ -17,6 +17,10 @@ interface RegisterModalProps {
   onRegister: (amount: number) => void;
   balance: number;
   isPending: boolean;
+  // Optional labels so the same modal can serve "register" and "buy more chips"
+  title?: string;
+  description?: string;
+  submitLabel?: string;
 }
 
 const RegisterModalComponent = dynamic(() => Promise.resolve(RegisterModalInner), {
@@ -24,7 +28,16 @@ const RegisterModalComponent = dynamic(() => Promise.resolve(RegisterModalInner)
 });
 
 // Composant interne
-function RegisterModalInner({ isOpen, onClose, onRegister, balance, isPending }: RegisterModalProps) {
+function RegisterModalInner({
+  isOpen,
+  onClose,
+  onRegister,
+  balance,
+  isPending,
+  title = 'Register & buy chips',
+  description = 'Deposit ETH to receive CHIP tokens, converted at the current ETH/USD price. This registers you and mints chips to your wallet.',
+  submitLabel = 'Register & buy chips',
+}: RegisterModalProps) {
   const [amount, setAmount] = useState<string>('');
 
   const handleRegister = () => {
@@ -40,10 +53,9 @@ function RegisterModalInner({ isOpen, onClose, onRegister, balance, isPending }:
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="bg-gray-900 text-white border-emerald-500/20">
         <DialogHeader>
-          <DialogTitle className="text-emerald-400">Register &amp; buy chips</DialogTitle>
+          <DialogTitle className="text-emerald-400">{title}</DialogTitle>
           <DialogDescription className="text-gray-400">
-            Deposit ETH to receive CHIP tokens, converted at the current ETH/USD price.
-            This registers you and mints chips to your wallet.
+            {description}
           </DialogDescription>
         </DialogHeader>
         <div className="py-4">
@@ -82,7 +94,7 @@ function RegisterModalInner({ isOpen, onClose, onRegister, balance, isPending }:
             disabled={isPending || !amount || parseFloat(amount) <= 0 || parseFloat(amount) > balance}
             className="bg-emerald-500 hover:bg-emerald-600 text-black"
           >
-            {isPending ? 'Processing...' : 'Register & buy chips'}
+            {isPending ? 'Processing...' : submitLabel}
           </Button>
         </DialogFooter>
       </DialogContent>
